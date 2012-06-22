@@ -1,6 +1,7 @@
 GCC=gcc
 CCFLAGS=-Wall -pedantic -std=c99 -D_BSD_SOURCE
-LDFLAGS=-lImlib2
+CCFLAGS+=`pkg-config --cflags gdk-pixbuf-2.0`
+LDFLAGS=`pkg-config --libs gdk-pixbuf-2.0`
 PROG=icat
 MODS=icat.o
 

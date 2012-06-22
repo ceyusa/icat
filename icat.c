@@ -36,7 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <getopt.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
-#include <Imlib2.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 
 #define VERSION "0.3"
 
@@ -75,19 +75,19 @@ static uint32_t colors[] = {
 	// >= 233: Grey ramp
 	0x000000, 0x121212, 0x1c1c1c, 0x262626, 0x303030, 0x3a3a3a, 0x444444, 0x4e4e4e,
 	0x585858, 0x626262, 0x6c6c6c, 0x767676, 0x808080, 0x8a8a8a, 0x949494, 0x9e9e9e,
-	0xa8a8a8, 0xb2b2b2, 0xbcbcbc, 0xc6c6c6, 0xd0d0d0, 0xdadada, 
+	0xa8a8a8, 0xb2b2b2, 0xbcbcbc, 0xc6c6c6, 0xd0d0d0, 0xdadada,
 };
 
 // Find an xterm color value that matches an ARGB color
-uint8_t rgb2xterm(Imlib_Color* pixel) {
+uint8_t rgb2xterm(guchar *pixel) {
 	uint8_t c, match = 0;
 	uint32_t r, g, b, d, distance;
 
 	distance = 1000000000;
 	for(c = 0; c <= 253; c++) {
-		r = ((0xff0000 & colors[c]) >> 16) - pixel->red;
-		g = ((0x00ff00 & colors[c]) >> 8)  - pixel->green;
-		b = (0x0000ff & colors[c]) - pixel->blue;
+		r = ((0xff0000 & colors[c]) >> 16) - pixel[0];
+		g = ((0x00ff00 & colors[c]) >> 8)  - pixel[1];
+		b = (0x0000ff & colors[c]) - pixel[2];
 		d = r * r + g * g + b * b;
 		if (d < distance) {
 			distance = d;
@@ -133,17 +133,17 @@ int terminal_width() {
 // Prints two pixels inside one character, p1 below p2.
 // Characters in terminal fonts are usually twice as high
 // as they are wide.
-void print_pixels(Imlib_Color* p1, Imlib_Color* p2) {
+void print_pixels(guchar *p1, guchar *p2) {
 	static char* upper = "▀";
 	static char* lower = "▄";
-	if (p1->alpha == 0 && p2->alpha == 0) {
+	if (p1[3] == 0 && p2[3] == 0) {
 		// Both pixels are transparent
 		printf(" ");
-	} else if (p1->alpha == 0 && p2->alpha != 0) {
+	} else if (p1[3] == 0 && p2[3] != 0) {
 		// Only lower pixel is transparent
 		uint8_t col2 = rgb2xterm(p2);
 		printf("\x1b[0m\x1b[38;5;%dm%s", col2, upper);
-	} else if (p1->alpha != 0 && p2->alpha == 0) {
+	} else if (p1[3] != 0 && p2[3] == 0) {
 		// Only upper pixel is transparent
 		uint8_t col1 = rgb2xterm(p1);
 		printf("\x1b[0m\x1b[38;5;%dm%s", col1, lower);
@@ -158,11 +158,13 @@ void print_pixels(Imlib_Color* p1, Imlib_Color* p2) {
 int main(int argc, char* argv[]) {
 	char *filename;
 	static int display_help = 0;
-	Imlib_Image image = NULL;
+	GdkPixbuf *image = NULL;
 	unsigned int x = 0;
 	unsigned int y = 0;
 	int c;
 	bool keep_size = false;
+
+        g_type_init();
 
 	for(;;) {
 		static struct option long_options[] = {
@@ -235,26 +237,35 @@ int main(int argc, char* argv[]) {
 	}
 
 	// Load image
-	image = imlib_load_image_immediately(filename);
+	image = gdk_pixbuf_new_from_file(filename, NULL);
 	if (!image) {
 		fprintf(stderr, "Could not load image: %s\n", filename);
 		exit(EXIT_FAILURE);
 	}
 
-	imlib_context_set_image(image);
-	int width = imlib_image_get_width();
-	int height = imlib_image_get_height();
+	int n_channels = gdk_pixbuf_get_n_channels (image);
+
+	g_assert (gdk_pixbuf_get_colorspace (image) == GDK_COLORSPACE_RGB);
+	g_assert (gdk_pixbuf_get_bits_per_sample (image) == 8);
+	g_assert (gdk_pixbuf_get_has_alpha (image));
+	g_assert (n_channels == 4);
+
+	int width = gdk_pixbuf_get_width(image);
+	int height = gdk_pixbuf_get_height(image);
 
 	// Find out terminal size and resize image to fit, if necessary
 	if (!keep_size) {
 		int cols = terminal_width();
 		if (cols < width - 1) {
 			int resized_width = cols - 1;
-			int resized_height = (int)(height * ((float)resized_width / width)); 
-			Imlib_Image resized_image = imlib_create_cropped_scaled_image(0, 0,
-					width, height, resized_width, resized_height);
-			imlib_free_image_and_decache();
-			imlib_context_set_image(resized_image);
+			int resized_height = (int)(height * ((float)resized_width / width));
+
+			GdkPixbuf *resized_image =
+				gdk_pixbuf_scale_simple(image, resized_width, resized_height,
+							GDK_INTERP_NEAREST);
+
+			g_object_unref(image);
+			image = resized_image;
 			width = resized_width;
 			height = resized_height;
 		}
@@ -265,9 +276,11 @@ int main(int argc, char* argv[]) {
 	if (y > 0) {
 		printf("\x1b[%d;%dH", y, x);
 	}
-	
-	Imlib_Color pixel1;
-	Imlib_Color pixel2;
+
+	int rowstride = gdk_pixbuf_get_rowstride (image);
+	guchar *pixels = gdk_pixbuf_get_pixels (image);
+
+	guchar *p1, *p2;
 	for (int h = 0; h < height; h += 2) {
 		// If an x-offset is given, position the cursor in that column
 		if (x > 0) {
@@ -278,14 +291,14 @@ int main(int argc, char* argv[]) {
 		// pixel lines in order to keep the pixels square (most console
 		// fonts have two times the height for the width of each character)
 		for (int w = 0; w < width; w++) {
-			imlib_image_query_pixel(w, h + 1, &pixel1);
-			imlib_image_query_pixel(w, h, &pixel2);
-			print_pixels(&pixel1, &pixel2);
+			p1 = pixels + (h + 1) * rowstride + w * n_channels;
+			p2 = pixels + h * rowstride + w * n_channels;
+			print_pixels(p1, p2);
 		}
 		printf("\x1b[0m\n");
 	}
 
-	imlib_free_image_and_decache();
+	g_object_unref(image);
 	return 0;
 }
 
